@@ -59,7 +59,7 @@ it returns:
 0.09401798148694418
 ```
 
-The built-in PDFAs (functions);
+The built-in PDFAs (functions) include:
 1. Minimal SL2: no_ab_example()
 2. Canonical SL2: no_ab_canonical_example()
 3. Minimal LT2: exists_ab_example()
@@ -74,4 +74,4 @@ The built-in PDFAs (functions);
 To test your own Probabilistic Finite-state Acceptors, you should write a function in Python
 
 
-- Feel free to contact me (hutengdai[*]gmail.com) if you have any questions!
+* Feel free to contact Huteng Dai (hutengdai[*]gmail.com) and Richard Futrell (rfutrell@uci.edu) if you have any questions!
