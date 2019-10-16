@@ -1,5 +1,5 @@
 # Information-theoretic-Characterization-of-Subregular-Hierarchy
-This is the repository for the project of Information-theoretic Characterization of Subregular Hierarchy [[Manuscript](http://hutengdai.com/files/daifutrell2020.pdf)]. 
+This is the repository for the project of Information-theoretic Characterization of Subregular Hierarchy (Dai & Futrell 2020) [[Manuscript](http://hutengdai.com/files/daifutrell2020.pdf)]. 
 
 Prerequisites: Python 3, PyTorch, IPython. 
 
