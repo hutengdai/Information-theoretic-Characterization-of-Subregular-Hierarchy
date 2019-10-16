@@ -30,26 +30,33 @@ sl2 = pfa.no_ab_example()
 ```bash
 sl2.statistical_complexity
 ```
+it returns:
+```bash
+0.8453509366224364
+```
 - Step 8: Compute the bound of Crypticity using sl2.crypticity_estimate(step). 
 ```bash
-sl2.crypticity_estimate(3)
-sl2.crypticity_estimate(4)
 ......
 sl2.crypticity_estimate(7)
 sl2.crypticity_estimate(8)
 ......
 #Iterate this process until reach the limit of your computer power when your IPython drops
 ```
-
+it returns:
+```bash
+0.7513329551354923
+```
 - Step 9: Compute the bound of Excess Entropy using sl2.excess_entropy_estimate(step). 
 ```bash
-sl2.excess_entropy_estimate(3)
-sl2.excess_entropy_estimate(4)
 ......
 sl2.excess_entropy_estimate(7)
 sl2.excess_entropy_estimate(8)
 ......
 #Iterate this process until reach the limit of your computer power when your IPython drops
+```
+it returns:
+```bash
+0.09401798148694418
 ```
 
 The built-in PDFAs (functions);
