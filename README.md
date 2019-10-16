@@ -9,14 +9,15 @@ Usage:
 - Step 1: Install all modules in rfutils from https://github.com/Futrell/rfutils. 
 
 - Step 2: Github clone the repository to your directory 
-- Step 3: Change directory to the folder which contain pfa.py
-```bash
-cd [your directory] 
-```
-- Step 4: Open IPython
+- Step 3: Open IPython
 ```bash
 ipython
 ```
+- Step 4: Change directory to the folder which contain pfa.py
+```bash
+cd [your directory] 
+```
+
 - Step 5: In IPython, import pfa.py as a module
 ```bash
 import pfa
