@@ -1,9 +1,7 @@
 # Information-theoretic-Characterization-of-Subregular-Hierarchy
-This is the repository for the project of Information-theoretic Characterization of Subregular Hierarchy
+This is the repository for the project of Information-theoretic Characterization of Subregular Hierarchy [Manuscript](http://hutengdai.com/files/daifutrell2020.pdf). 
 
 Prerequisites: Python 3, PyTorch, IPython. 
-
-
 
 Usage:
 - Step 1: Install all modules in rfutils from https://github.com/Futrell/rfutils. 
