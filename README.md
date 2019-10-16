@@ -74,7 +74,7 @@ The built-in PDFAs (functions) include:
 To test your own Probabilistic Finite-state Acceptors, you should write a function in pfa.py, such as:
 ```python
 def no_ab_example():
-    source = np.array([1]) 
+    source = np.array([1]) # Initialize a matrix with all 1 probabilities
     pi = np.array([         
         [[1/4, 1/4, 1/4, 1/4], # From state 0, the probabilities of emitting #, a, b, c
          [1/3, 1/3, 0, 1/3]]   # From state 1, the probabilities of emitting #, a, b, c
