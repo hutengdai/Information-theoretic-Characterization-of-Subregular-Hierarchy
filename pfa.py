@@ -21,12 +21,14 @@ from math import log, exp
 
 import numpy as np
 import torch
+import torch.optim
 from rfutils import lazy_property, memoize
 
 colon = slice(None)
 newaxis = None
 log2 = log(2)
 INF = float('inf')
+EOS = '!!</S>!!'
 
 def stationary(M):
     if isinstance(M, torch.Tensor):
@@ -97,7 +99,26 @@ def mutual_information(joint_ps, cond_ps, marginal_ps):
     return entropy(marginal_ps) - conditional_entropy(joint_ps, cond_ps)
 
 class PFA(object):
+
     def __init__(self, source, pi, mu):
+        """ As we are defining it, a PFA has three parameters:
+        
+        pi: The action policy, a probability distribution on actions A given goal states G and memory states M.
+            This is represented as a GxMxA tensor, where G is the number of goal states, M is the number of memory states, and A is the number of possible actions.
+            The last dimension of pi gives the probability p(A|G, M), so it should sum to 1. 
+        mu: The memory policy, a probability distribution on memory states given actions and previous memory states.
+            Represented as an AxMxM tensor, where A is the number of actions and M is the number of memory states.
+        source: A probability distribution on goal states. Represented as a vector. Usually [1], indicating that we effectively aren't using goal states.
+
+        """
+        assert source.ndim == 1, source.ndim
+        assert mu.ndim == 3, mu.ndim
+        assert pi.ndim == 3, pi.ndim
+
+        assert source.shape[0] == pi.shape[0]
+        assert pi.shape[2] == mu.shape[0]
+        assert pi.shape[1] == mu.shape[1] == mu.shape[2]
+        
         self.pi = pi # matrix G x M x A -> Prob
         self.mu = mu # matrix A x M x M -> Prob
         self.source = source # vector G -> Prob
@@ -106,8 +127,20 @@ class PFA(object):
     def is_unifilar(self):
         # Because G influences A beyond M,
         # G has to be included in the definition of "state" for unifilarity.
-        # So:
-        return conditional_entropy(self.mu_joint, self.mu) + entropy(self.source) == 0
+        # So we enforce H[G] == 0 for unifilarity.
+        # Conceivably, there are cases where H[G]>0 but we have unifilarity,
+        # but these are strange and don't seem important now.
+        def conditions():
+            yield entropy(self.source) == 0
+
+            # Because of the way we've defined the PFA,
+            # we know H[M' | G, A, M] = H[M' | A, M].
+            # Now check that that is equal to zero:
+            yield conditional_entropy(self.mu_joint, self.mu) == 0
+        return all(conditions())
+
+    def marginalize_source(self):
+        return PDFA(torch.Tensor([1]), torch.stack([self.state_emission_matrix]), self.mu)
 
     def generate(self):
         num_g = self.source.shape[-1]
@@ -182,6 +215,9 @@ class PFA(object):
     @memoize
     def iterated_joint_matrix(self, k):
         """ AxAx...xA matrix of dimension k+1, giving p(a_{t+1}|m_{t+1}, a_t, m_t, ..., a_{t-k+1}) """
+        # WARNING: Does not properly take source into account! Only ok if entropy(source)==0.
+        assert entropy(self.source) == 0
+        
         initial = self.stationary_M
         integration = transpose(self.mu, 0, 1)#self.mu.transpose((1,0,2))
         emission = self.state_emission_matrix
@@ -230,9 +266,9 @@ class PFA(object):
     def excess_entropy_estimate(self, k):
         """ Lower bound estimate of excess entropy """
         entropy_rate_estimates = [self.entropy_rate_estimate(t) for t in range(k+1)]
-        return sum(entropy_rate_estimates[-1] - self.entropy_rate)
+        h_last = self.entropy_rate_estimates[-1]
+        return sum(h - h_last for h in entropy_rate_estimates)
     
-
     def crypticity_estimate(self, k):
         """ Upper bound estimate of crypticity """
         S = self.statistical_complexity
@@ -332,17 +368,32 @@ class PFA(object):
 
         return [H_M_MA, I_M_A, I_M_M, Syn_M_M_A]
 
+class ConditionalPDFA(PFA):
+    def __init__(self, *a, **k):
+        super(ConditionalPDFA, self).__init__(*a, **k)
+        assert self.is_conditionally_unifilar
+
+    @lazy_property
+    def is_conditionally_unifilar(self):
+        G = self.source.shape[0]
+        def conditions():
+            for g in range(G):
+                gvec = torch.Tensor(one_hot(g, G))
+                yield PFA(gvec, self.pi, self.mu).is_unifilar
+        return all(conditions())
+
 class PDFA(PFA):
     """ PDFA differs from PFA in that mu is deterministic.
     Therefore, we can calculate entropy rate and conditional entropy rate in closed form. 
     """
     def __init__(self, *args, **kwds):
         super(PDFA, self).__init__(*args, **kwds)
+        self.check_unifilar()
 
     def check_unifilar(self):
         if not self.is_unifilar:
             badness = conditional_entropy(self.mu_joint, self.mu) + entropy(self.source)
-            print("Warning: Calculating entropy rate as if PFA were deterministic, but it is not: Badness %s" % badness, file=sys.stderr)
+            print("Warning: PDFA object is not actually deterministic: Badness %s" % badness, file=sys.stderr)
     
     @lazy_property
     def entropy_rate(self):
@@ -351,22 +402,102 @@ class PDFA(PFA):
         joint = self.stationary_M[:, newaxis] * self.state_emission_matrix
         return conditional_entropy(joint, self.state_emission_matrix)
 
-    @lazy_property
-    def conditional_entropy_rate(self):
-        """ Entropy rate conditional on G. 
-        This formula only works if I[G : A_t : A_{<t} | M] = 0 
-        """
-        joint = self.source[:, newaxis, newaxis] * self.conditional_stationary_M[:, :, newaxis] * self.pi
-        return conditional_entropy(joint, self.pi)
-
-    @lazy_property
-    def information_rate(self):
-        return self.entropy_rate - self.conditional_entropy_rate
 
     def excess_entropy_estimate(self, k):
         """ Lower bound estimate of excess entropy """
         entropy_rate_estimates = [self.entropy_rate_estimate(t) for t in range(k+1)]
-        return sum(entropy_rate_estimates - self.entropy_rate)
+        return sum(h - self.entropy_rate for h in entropy_rate_estimates)
+
+
+def code_to_pdfa_with_delimiter(code):
+    # Produce a PFA that generates a code.
+    # The PFA is not guaranteed to be minimal: in fact it usually won't be.
+    # It is deterministic conditional on the source symbols.
+    # Code is a dictionary from goals to sequences of symbols.
+    # e.g., a -> 0, b -> 10, c -> 110, d -> 111
+    # PFA will generate 0#, 10#, 110#, 111#, etc.
+    code = dict(code)
+    
+    # Will need canonically ordered lists of goals and codes:
+    goals = sorted(list(code.keys()))
+    seqs = [code[g] for g in goals]
+    
+    N = len(code) # number of source symbols
+    
+    vocab = [EOS] + list(frozenset.union(frozenset(), *code.values()))
+    V = len(vocab)
+
+    # Source is uniform over the goals:
+    source = torch.ones(N) / N
+
+    # Transitions go deterministically into the next state,
+    # or into the first state if the sequence is over. That means
+    # that the memory state generally has to fully encode the goal,
+    # or that there has to be an end-of-sequence symbol.
+    # Here we use the end-of-sequence symbol:
+    num_states = max(len(v) for v in code.values()) + 1
+
+    # In general, regardless of the emitted symbol, we always
+    # transition into the next state; except if the emitted symbol
+    # is EOS, then we go into the first state.
+    # (i.e., I[A:M'|M] = 0)
+    # Transition tensor mu has dimensions AxMxM
+    # We start by generating a generic MxM that sends you into the next state.
+    M_next = torch.cat([torch.zeros(num_states)[None, :], torch.eye(num_states)]).T[:num_states, :num_states]
+
+    # We will also need the matrix that sends everything into the initial state:
+    M_final = torch.zeros(num_states, num_states)
+    M_final[:,0] = 1
+
+    # Finally, mu uses M_final for EOS (the first vocab symbol),
+    # and M_next for everything else:
+    mu = torch.stack([M_final] + [M_next for _ in range(V - 1)])
+
+    # Now we need to generate pi.
+    # Pi is GxMxA, so we first iterate through goals:
+    pi = [
+        [
+            one_hot(vocab.index(seq[i] if i<len(seq) else EOS), V)
+            for i in range(num_states)
+        ]
+        for g, seq in zip(goals, seqs)
+    ]
+    pi = torch.Tensor(pi)
+
+    return ConditionalPDFA(source, pi, mu)
+            
+def one_hot(k, n):
+    y = [0 for _ in range(n)]
+    y[k] = 1
+    return y
+
+def maxent(pdfa, num_epochs=5000, **kwds):
+    """ Given a PDFA, return a new PDFA with the same transition function mu
+    but with an emission distribution pi that maximizes entropy rate.
+
+    The emission distribution pi is optimized by gradient descent by PyTorch;
+    this function takes keyword parameters that will be passed to the
+    optimized. 
+
+    Note that the resulting emission distribution pi cannot have any 
+    zero entries, but they may be very small.
+    """
+    # Find pi to maximize the entropy rate give source and mu
+    # This is a convex problem so gradient descent will converge to the global optimum
+    source = torch.Tensor(pdfa.source)
+    pi = torch.Tensor(pdfa.pi)
+    mu = torch.Tensor(pdfa.mu)
+    pi_logit = torch.tensor(logit(epsilonify(pi)), requires_grad=True)
+    opt = torch.optim.Adam(params=[pi_logit], **kwds)
+    for i in range(num_epochs):
+        opt.zero_grad()
+        pi = torch.softmax(pi_logit, dim=-1)
+        h = -PDFA(source, pi, mu).entropy_rate
+        h.backward()
+        opt.step()
+        if i % 500 == 0:
+            print((-h).item(), file=sys.stderr)
+    return PDFA(source, pi, mu)
     
 def test_xor_example():
     """ 
@@ -420,7 +551,7 @@ def test_xor_example():
 def logit(x):
     return torch.log(x/(1-x))
 
-def epsilonify(x, eps=.00001):
+def epsilonify(x, eps=10**-10):
     interval = 1 - 2*eps
     return (x * interval) + eps
 
@@ -489,30 +620,6 @@ def test_pdfa_entropy_rate_simple():
         reference_entropy = entropy(pi[0,0,:])
         assert np.abs(machine.entropy_rate - reference_entropy) < epsilon
 
-def pdfa_entropy_rate_weird():
-    # Note: The PDFA here is not the epsilon-machine for this language,
-    # so asymptotic synchronization to the PDFA states is not guaranteed!
-    # This code is not decodable for a maximum-entropy source,
-    # but it would be if we add delimiter symbols (sync words).
-    # Word boundaries = soft sync words.
-    pi = np.array([
-        [[1, 0], [0, 1]],
-        [[0, 1], [1, 0]],
-    ])
-    mu = np.array([
-        [[0, 1], [1, 0]],
-        [[0, 1], [1, 0]],
-    ])
-
-    epsilon = .000001        
-    probs = np.linspace(.01, .09)        
-    for prob in probs:
-        source = np.array([prob, 1 - prob])
-        machine = PDFA(source, pi, mu)
-
-        assert np.abs(machine.entropy_rate - entropy(source)) < epsilon
-        assert np.abs(machine.conditional_entropy_rate - 0) < epsilon    
-    
 def no_ab_canonical_example():
     source = np.array([1])
     pi = np.array([  
@@ -533,18 +640,46 @@ def no_ab_canonical_example():
     no_ab_canonical = PDFA(source, pi, mu)
     return no_ab_canonical
     
+def no_ab_example():
+    source = np.array([1])
+    pi = np.array([  
+        [[1/4,1/4,1/4, 1/4],
+         [1/3,1/3,0,1/3]]             
+    ])
+    mu = np.array([
+        [[1, 0], # symbol #
+         [1, 0]],
+        [[0, 1], # symbol a
+         [0, 1]],
+        [[1, 0], # symbol b
+         [0, 0]],
+        [[1, 0], # symbol c
+         [1, 0]]
+    ])
+
+    no_ab = PDFA(source, pi, mu)
+    return no_ab
 
 def exists_ab_example():
     source = np.array([1])
     pi = np.array([  
-        [[0, 1/2, 1/2],
-         [0, 1/2, 1/2],
-         [1/2, 1/4, 1/4]],             
+        [[0, 1/3, 1/3, 1/3], # from state 0, emit a with prob. 1/2, or b with prob 1/2
+         [0, 1/3, 1/3, 1/3], # from state 1, emit a with prob. 1/2, or b with prob 1/2
+         [1/4, 1/4, 1/4, 1/4]], # from state 2, emit # with prob 1/2, a with prob 1/4, or b with prob 1/4
     ])
     mu = np.array([
-        [[0, 0, 0], [0, 0, 0], [1, 0, 0]],
-        [[0, 1, 0], [0, 1, 0], [0, 0, 1]],
-        [[1, 0, 0], [0, 0, 1], [0, 0, 1]],
+        [[0, 0, 0], 
+         [0, 0, 0], 
+         [1, 0, 0]], # upon emitting #, from state 2, go into state 0
+        [[0, 1, 0], 
+         [0, 1, 0], 
+         [0, 0, 1]], # upon emitting a, from state 0 or 1, go into state 1; from 2, go into 2
+        [[1, 0, 0], 
+         [0, 0, 1], 
+         [0, 0, 1]], # upon emitting b, from state 0 go into state 0; from 1 go into 2; from 2 go into 2
+        [[1, 0, 0], 
+         [1, 0, 0], 
+         [0, 0, 1]] # symbol c
     ])
 
     E_ab = PDFA(source, pi, mu)
@@ -553,24 +688,24 @@ def exists_ab_example():
 def exists_ab_canonical_example():
     source = np.array([1])
     pi = np.array([  
-        [[0, 1/2, 1/2],
-         [0, 1/2, 1/2],
-         [0, 1/2, 1/2],
-         [1/2, 1/4, 1/4]],             
+        [[0, 1/2, 1/2], # from state 0, emit a or b
+         [0, 1/2, 1/2], # from state 1, emit a or b
+         [0, 1/2, 1/2], # from state 2, emit a or b
+         [1/2, 1/4, 1/4]], # from state 3, emit #, a, or b
     ])
     mu = np.array([
-        [[0, 0, 0, 0],
-        [0, 0, 0, 0], 
-        [0, 0, 0, 0], 
-        [1, 0, 0, 0]],
-        [[0, 1, 0, 0], 
-        [0, 1, 0, 0], 
-        [0, 0, 0, 1], 
-        [0, 0, 0, 1]],
-        [[0, 0, 1, 0], 
-        [0, 0, 0, 1], 
-        [0, 0, 1, 0], 
-        [0, 0, 0, 1]],
+        [[0, 0, 0, 0], # upon emitting #, from state 0, go nowhere -- this state is impossible
+        [0, 0, 0, 0], # impossible
+        [0, 0, 0, 0], # impossible
+        [1, 0, 0, 0]], # upon emitting #, from state 2, go into state 0
+        [[0, 1, 0, 0],  # upon emitting a, from state 0, go into state 1
+        [0, 1, 0, 0], # upon emitting a, from 1, go into 1
+        [0, 0, 0, 1], # upon emitting a, from 2, go into 3
+        [0, 0, 0, 1]], # upon emitting a, from 3, go into 3
+        [[0, 0, 1, 0], # upon emitting b, from 0, go into 2
+        [0, 0, 0, 1], # upon emitting b, from 1, go into 3
+        [0, 0, 1, 0], # upon emitting b, from 2, go into 2
+        [0, 0, 0, 1]], # upon emitting b, from 3, go into 3
     ])
 
     exists_ab_canonical = PDFA(source, pi, mu)
@@ -579,28 +714,28 @@ def exists_ab_canonical_example():
 def one_ab_example():
     source = np.array([1])
     pi = np.array([
-        [[0, 1/2, 1/2],
-         [0, 1/2, 1/2],
-         [1/2, 1/4, 1/4],
-         [1/2, 1/2, 0],
-         [1/3, 1/3, 1/3]]
+        [[0, 1/3, 1/3, 1/3],
+         [0, 1/3, 1/3, 1/3],
+         [1/4, 1/4, 1/4, 1/4],
+         [1/3, 1/3, 0, 1/3]]
     ])
     mu = np.array([
-        [[0, 0, 0, 0, 0], # on symbol #
-         [0, 0, 0, 0, 0],
-         [1, 0, 0, 0, 0],
-         [1, 0, 0, 0, 0],
-         [1, 0, 0, 0, 0]],
-        [[0, 1, 0, 0, 0], # on symbol a
-         [0, 1, 0, 0, 0],
-         [0, 0, 0, 1, 0],
-         [0, 0, 0, 1, 0],
-         [0, 0, 0, 1, 0]],
-        [[1, 0, 0, 0, 0], # on symbol b
-         [0, 0, 1, 0, 0],
-         [0, 0, 0, 0, 1],
-         [0, 0, 0, 0, 0],
-         [0, 0, 0, 0, 1]]    
+        [[0, 0, 0, 0], # on symbol #
+         [0, 0, 0, 0],
+         [1, 0, 0, 0],
+         [1, 0, 0, 0]],
+        [[0, 1, 0, 0], # on symbol a
+         [0, 1, 0, 0],
+         [0, 0, 0, 1],
+         [0, 0, 0, 1]],
+        [[1, 0, 0, 0], # on symbol b
+         [0, 0, 1, 0],
+         [0, 0, 1, 0],
+         [0, 0, 0, 0]],
+        [[1, 0, 0, 0], # on symbol c
+         [0, 0, 1, 0],
+         [0, 0, 1, 0],
+         [0, 0, 0, 1]]   
     ])
 
     one_ab = PDFA(source, pi, mu)
@@ -641,24 +776,199 @@ def one_ab_canonical_example():
     one_ab_canonical = PDFA(source, pi, mu)
     return one_ab_canonical
 
-def star_free_example():
+def strictly_piecewise_example():
     source = np.array([1])
     pi = np.array([
-        [[0, 1, 0],
-         [1/2, 1/4, 1/4]],
+        [[1/4, 1/4, 1/4, 1/4],
+         [1/3, 1/3, 0, 1/3]],
     ])
 
     mu = np.array([
-        [[0, 0], # on symbol #
+        [[1, 0], # on symbol #
          [1, 0]],
         [[0, 1], # on symbol a
          [0, 1]],
-        [[0, 0], # on symbol b
+        [[1, 0], # on symbol b
+         [0, 0]],
+        [[1, 0], # on symbol c
          [0, 1]]
+    ])
+
+    strictly_piecewise = PDFA(source, pi, mu)
+    return strictly_piecewise
+
+def piecewise_testable_example():
+    source = np.array([1])
+    pi = np.array([
+        [[0, 1/3, 1/3, 1/3],
+         [0, 1/3, 1/3, 1/3],
+         [1/4, 1/4, 1/4, 1/4]]
+    ])
+
+    mu = np.array([
+        [[0, 0, 0], # on symbol #
+         [0, 0, 0],
+         [1, 0, 0]],
+        [[0, 1, 0], # on symbol a
+         [0, 1, 0],
+         [0, 1, 0]],
+        [[1, 0, 0], # on symbol b
+         [0, 0, 1],
+         [0, 0, 1]],
+        [[1, 0, 0], # on symbol c
+         [0, 1, 0],
+         [0, 0, 1]]
+    ])
+    
+    piecewise_testable = PDFA(source, pi, mu)
+    return piecewise_testable
+
+
+def star_free_example():
+    source = np.array([1])
+    pi = np.array([
+        [[1/3, 1/3, 0, 1/3],
+         [0, 1/3, 1/3, 1/3],
+         [1/4, 1/4, 1/4, 1/4]]
+    ])
+
+    mu = np.array([
+        [[1, 0, 0], # on symbol #
+         [0, 0, 0],
+         [1, 0, 0]],
+        [[0, 1, 0], # on symbol a
+         [0, 1, 0],
+         [0, 0, 1]],
+        [[0, 0, 0], # on symbol b
+         [0, 0, 1],
+         [0, 0, 1]],
+        [[1, 0, 0], # on symbol c
+         [0, 1, 0],
+         [0, 0, 1]]
     ])
 
     star_free = PDFA(source, pi, mu)
     return star_free
+
+def strictly_piecewise_factored_a_example():
+    source = np.array([1])
+    pi = np.array([
+        [[1/3, 1/3, 1/3],
+         [1/2, 1/2, 0]]
+    ])
+
+    mu = np.array([
+        [[1, 0], # on symbol #
+         [1, 0]],
+        [[0, 1], # on symbol a
+         [0, 1]],
+        [[1, 0], # on symbol b
+         [0, 0]]
+    ])
+
+    strictly_piecewise_factored = PDFA(source, pi, mu)
+    return strictly_piecewise_factored
+
+def strictly_piecewise_factored_b_example():
+    source = np.array([1])
+    pi = np.array([
+        [[1/3, 1/3, 1/3],
+         [1/3, 1/3, 1/3]]
+    ])
+
+    mu = np.array([
+        [[1, 0], # on symbol #
+         [1, 0]],
+        [[1, 0], # on symbol a
+         [0, 1]],
+        [[0, 1], # on symbol b
+         [0, 1]]
+    ])
+
+    strictly_piecewise_factored = PDFA(source, pi, mu)
+    return strictly_piecewise_factored
+
+def strictly_piecewise_factored_product_example():
+    source = np.array([1])
+    pi = np.array([
+        [[1/3, 1/3, 1/3],
+        [1/2, 1/2, 0],
+        [1/3, 1/3, 1/3],
+        [1/3, 1/3, 1/3]]
+    ])
+
+    mu = np.array([
+        [[1, 0, 0, 0], # on symbol #
+         [1, 0, 0, 0],
+         [1, 0, 0, 0],
+         [1, 0, 0, 0]],
+        [[0, 1, 0, 0], # on symbol a
+         [0, 1, 0, 0],
+         [0, 0, 0, 1],
+         [0, 0, 0, 1]],
+        [[0, 0, 1, 0], # on symbol b
+         [0, 0, 0, 0],
+         [0, 0, 1, 0],
+         [0, 0, 0, 1]],
+    ])
+
+    strictly_piecewise_factored = PDFA(source, pi, mu)
+    return strictly_piecewise_factored
+
+def strictly_local_three_example():
+    source = np.array([1])
+    pi = np.array([
+        [[1/4, 1/4, 1/4, 1/4],
+         [1/4, 1/4, 1/4, 1/4],
+         [1/3, 1/3, 1/3, 0]]
+    ])
+
+    mu = np.array([
+        [[1, 0, 0], # on symbol #
+         [1, 0, 0],
+         [1, 0, 0]],
+        [[0, 1, 0], # on symbol a
+         [0, 1, 0],
+         [0, 1, 0]],
+        [[1, 0, 0], # on symbol b
+         [0, 0, 1],
+         [1, 0, 0]],
+        [[1, 0, 0], # on symbol c
+         [1, 0, 0],
+         [0, 0, 0]]
+    ])
+    strictly_local_three = PDFA(source, pi, mu)
+    return strictly_local_three
+
+def sl2_nt_example():
+    source = np.array([1])
+    pi = np.array([
+        [[1/4, 1/4, 1/4, 1/4],
+         [1/4, 1/4, 1/4, 1/4],
+         [1/4, 1/4, 1/4, 1/4],
+         [1/3, 0, 1/3, 1/3]]
+    ])
+    mu = np.array([
+        [[1, 0, 0, 0], # on symbol #
+         [1, 0, 0, 0],
+         [1, 0, 0, 0],
+         [1, 0, 0, 0]],
+        [[0, 1, 0, 0], # on symbol T
+         [0, 1, 0, 0],
+         [0, 1, 0, 0],
+         [0, 0, 0, 0]],
+        [[0, 0, 1, 0], # on symbol D
+         [0, 0, 1, 0],
+         [0, 0, 1, 0],
+         [0, 0, 1, 0]],
+        [[0, 0, 0, 1], # on symbol N
+         [0, 0, 0, 1],
+         [0, 0, 0, 1],
+         [0, 0, 0, 1]]   
+    ])
+
+    sl2_nt = PDFA(source, pi, mu)
+    return sl2_nt
 
 
 if __name__ == '__main__':
