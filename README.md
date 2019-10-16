@@ -6,7 +6,7 @@ Prerequisites: Python 3, PyTorch, IPython.
 Usage:
 - Step 1: Install all modules in rfutils from https://github.com/Futrell/rfutils. 
 
-- Step 2: Github clone the repository to your directory 
+- Step 2: From Github clone the repository to the directory on your computer 
 - Step 3: Open IPython
 ```bash
 ipython
