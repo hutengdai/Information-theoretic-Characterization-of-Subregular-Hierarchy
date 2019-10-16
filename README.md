@@ -71,7 +71,28 @@ The built-in PDFAs (functions) include:
 9. Minimal SL3: strictly_local_three_example()
 10. *NT (Pater 2016) SL2: sl2_nt_example()
 
-To test your own Probabilistic Finite-state Acceptors, you should write a function in Python
+To test your own Probabilistic Finite-state Acceptors, you should write a function in pfa.py, such as:
+```python
+def no_ab_example():
+    source = np.array([1]) 
+    pi = np.array([         
+        [[1/4, 1/4, 1/4, 1/4], # From state 0, the probabilities of emitting #, a, b, c
+         [1/3, 1/3, 0, 1/3]]   # From state 1, the probabilities of emitting #, a, b, c
+    ])
+    mu = np.array([
+        [[1, 0], # from state 0 to 0, does the PDFA emit symbol #? (Yes: 1, no: 0); from state 0 to 1, does the PDFA emit symbol #? (Yes: 1, no: 0);
+         [1, 0]], # from state 1 to 0, does the PDFA emit symbol #? (Yes: 1, no: 0); from state 1 to 1, does the PDFA emit symbol #? (Yes: 1, no: 0);
+        [[0, 1], # ...symbol a...
+         [0, 1]],
+        [[1, 0], # ...symbol b...
+         [0, 0]],
+        [[1, 0], # ...symbol c...
+         [1, 0]]
+    ])
+
+    no_ab = PDFA(source, pi, mu)
+    return no_ab
+```
 
 
-* Feel free to contact Huteng Dai (hutengdai[*]gmail.com) and Richard Futrell (rfutrell@uci.edu) if you have any questions!
+* Feel free to contact Huteng Dai (hutengdai@gmail.com) and Richard Futrell (rfutrell@uci.edu) if you have any questions!
