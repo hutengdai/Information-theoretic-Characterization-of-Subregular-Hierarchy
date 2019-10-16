@@ -38,8 +38,8 @@ sl2.crypticity_estimate(4)
 sl2.crypticity_estimate(7)
 sl2.crypticity_estimate(8)
 ......
+#Iterate this process until reach the limit of your computer power when your IPython drops
 ```
-Iterate this process until reach the limit of your computer power when your IPython drops
 
 - Step 9: Compute the bound of Excess Entropy using sl2.excess_entropy_estimate(step). 
 ```bash
@@ -49,8 +49,8 @@ sl2.excess_entropy_estimate(4)
 sl2.excess_entropy_estimate(7)
 sl2.excess_entropy_estimate(8)
 ......
+#Iterate this process until reach the limit of your computer power when your IPython drops
 ```
-Iterate this process until reach the limit of your computer power when your IPython drops
 
 The built-in PDFAs (functions);
 1. Minimal SL2: no_ab_example()
